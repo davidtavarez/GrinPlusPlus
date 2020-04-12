@@ -14,11 +14,13 @@
 #include <thread>
 
 TxHashSet::TxHashSet(
+	const Config& config,
 	std::shared_ptr<KernelMMR> pKernelMMR,
 	std::shared_ptr<OutputPMMR> pOutputPMMR,
 	std::shared_ptr<RangeProofPMMR> pRangeProofPMMR,
 	BlockHeaderPtr pBlockHeader)
-	: m_pKernelMMR(pKernelMMR),
+	: m_config(config),
+	m_pKernelMMR(pKernelMMR),
 	m_pOutputPMMR(pOutputPMMR),
 	m_pRangeProofPMMR(pRangeProofPMMR),
 	m_pBlockHeader(pBlockHeader),
@@ -27,15 +29,13 @@ TxHashSet::TxHashSet(
 
 }
 
-bool TxHashSet::IsUnspent(const OutputLocation& location) const
-{
-	return m_pOutputPMMR->IsUnpruned(location.GetMMRIndex());
-}
-
 bool TxHashSet::IsValid(std::shared_ptr<const IBlockDB> pBlockDB, const Transaction& transaction) const
 {
 	// Validate inputs
-	const uint64_t maximumBlockHeight = (std::max)(m_pBlockHeader->GetHeight() + 1, Consensus::COINBASE_MATURITY) - Consensus::COINBASE_MATURITY;
+	const uint64_t maximumBlockHeight = Consensus::GetMaxCoinbaseHeight(
+		m_config.GetEnvironment().GetEnvironmentType(),
+		m_pBlockHeader->GetHeight() + 1 // Add one since this is used by TransactionPool
+	);
 	for (const TransactionInput& input : transaction.GetInputs())
 	{
 		const Commitment& commitment = input.GetCommitment();
@@ -105,6 +105,9 @@ bool TxHashSet::ApplyBlock(std::shared_ptr<IBlockDB> pBlockDB, const FullBlock& 
 	Roaring blockInputBitmap;
 
 	// Prune inputs
+	std::vector<SpentOutput> spentPositions;
+	spentPositions.reserve(block.GetInputs().size());
+
 	for (const TransactionInput& input : block.GetInputs())
 	{
 		const Commitment& commitment = input.GetCommitment();
@@ -115,29 +118,27 @@ bool TxHashSet::ApplyBlock(std::shared_ptr<IBlockDB> pBlockDB, const FullBlock& 
 			return false;
 		}
 
+		spentPositions.push_back(SpentOutput(commitment, *pOutputPosition));
+
 		const uint64_t mmrIndex = pOutputPosition->GetMMRIndex();
 		m_pOutputPMMR->Remove(mmrIndex);
 		m_pRangeProofPMMR->Remove(mmrIndex);
-
-		blockInputBitmap.add((uint32_t)(mmrIndex + 1));
 	}
 
-	pBlockDB->AddBlockInputBitmap(block.GetHash(), blockInputBitmap);
+	pBlockDB->AddSpentPositions(block.GetHash(), spentPositions);
 
 	// Append new outputs
 	for (const TransactionOutput& output : block.GetOutputs())
 	{
 		std::unique_ptr<OutputLocation> pOutputPosition = pBlockDB->GetOutputPosition(output.GetCommitment());
-		if (pOutputPosition != nullptr)
+		if (pOutputPosition != nullptr && m_pOutputPMMR->IsUnpruned(pOutputPosition->GetMMRIndex()))
 		{
-			if (pOutputPosition->GetMMRIndex() < m_pBlockHeader->GetOutputMMRSize())
-			{
-				std::unique_ptr<OutputIdentifier> pOutput = m_pOutputPMMR->GetAt(pOutputPosition->GetMMRIndex());
-				if (pOutput != nullptr && pOutput->GetCommitment() == output.GetCommitment())
-				{
-					return false; // TODO: Handle this
-				}
-			}
+			LOG_ERROR_F("Output {} already exists at position {} and height {}",
+				output,
+				pOutputPosition->GetMMRIndex(),
+				pOutputPosition->GetBlockHeight()
+			);
+			return false;
 		}
 
 		const uint64_t mmrIndex = m_pOutputPMMR->GetSize();
@@ -197,15 +198,71 @@ bool TxHashSet::ValidateRoots(const BlockHeader& blockHeader) const
 	return true;
 }
 
-void TxHashSet::SaveOutputPositions(std::shared_ptr<IBlockDB> pBlockDB, const BlockHeader& blockHeader, const uint64_t firstOutputIndex)
+TxHashSetRoots TxHashSet::GetRoots(const std::shared_ptr<const IBlockDB>& pBlockDB, const TransactionBody& body)
 {
-	const uint64_t size = blockHeader.GetOutputMMRSize();
-	for (uint64_t mmrIndex = firstOutputIndex; mmrIndex < size; mmrIndex++)
+	for (const auto& kernel : body.GetKernels())
 	{
-		std::unique_ptr<OutputIdentifier> pOutput = m_pOutputPMMR->GetAt(mmrIndex);
-		if (pOutput != nullptr)
+		m_pKernelMMR->ApplyKernel(kernel);
+	}
+
+	for (const auto& input : body.GetInputs())
+	{
+		const auto pOutputPosition = pBlockDB->GetOutputPosition(input.GetCommitment());
+		if (pOutputPosition == nullptr)
 		{
-			pBlockDB->AddOutputPosition(pOutput->GetCommitment(), OutputLocation(mmrIndex, blockHeader.GetHeight()));
+			throw std::exception();
+		}
+
+		m_pOutputPMMR->Remove(pOutputPosition->GetMMRIndex());
+		m_pRangeProofPMMR->Remove(pOutputPosition->GetMMRIndex());
+	}
+
+	for (const auto& output : body.GetOutputs())
+	{
+		m_pOutputPMMR->Append(OutputIdentifier::FromOutput(output));
+		m_pRangeProofPMMR->Append(output.GetRangeProof());
+	}
+
+	const uint64_t numKernels = (MMRUtil::GetLeafIndex(m_pBlockHeader->GetKernelMMRSize())) + body.GetKernels().size();
+	const uint64_t kernelSize = MMRUtil::GetPMMRIndex(numKernels);
+	const auto kernelRoot = m_pKernelMMR->Root(kernelSize);
+
+	const uint64_t numOutputs = (MMRUtil::GetLeafIndex(m_pBlockHeader->GetOutputMMRSize())) + body.GetOutputs().size();
+	const uint64_t outputSize = MMRUtil::GetPMMRIndex(numOutputs);
+	const auto outputRoot = m_pOutputPMMR->Root(outputSize);
+	const auto rangeProofRoot = m_pRangeProofPMMR->Root(outputSize);
+
+	return TxHashSetRoots(
+		{ kernelRoot, kernelSize },
+		{ outputRoot, outputSize },
+		{ rangeProofRoot, outputSize }
+	);
+}
+
+void TxHashSet::SaveOutputPositions(const Chain::CPtr& pChain, std::shared_ptr<IBlockDB> pBlockDB) const
+{
+	uint64_t firstOutput = 0;
+	for (uint64_t height = 0; height <= m_pBlockHeader->GetHeight(); height++)
+	{
+		auto pIndex = pChain->GetByHeight(height);
+		if (pIndex != nullptr)
+		{
+			auto pHeader = pBlockDB->GetBlockHeader(pIndex->GetHash());
+			if (pHeader != nullptr)
+			{
+				const uint64_t size = pHeader->GetOutputMMRSize();
+				for (uint64_t mmrIndex = firstOutput; mmrIndex < size; mmrIndex++)
+				{
+					std::unique_ptr<OutputIdentifier> pOutput = m_pOutputPMMR->GetAt(mmrIndex);
+					if (pOutput != nullptr)
+					{
+						OutputLocation location(mmrIndex, pHeader->GetHeight());
+						pBlockDB->AddOutputPosition(pOutput->GetCommitment(), location);
+					}
+				}
+
+				firstOutput = pHeader->GetOutputMMRSize();
+			}
 		}
 	}
 }
@@ -281,19 +338,31 @@ std::vector<OutputDTO> TxHashSet::GetOutputsByMMRIndex(std::shared_ptr<const IBl
 	return outputs;
 }
 
-void TxHashSet::Rewind(std::shared_ptr<const IBlockDB> pBlockDB, const BlockHeader& header)
+void TxHashSet::Rewind(std::shared_ptr<IBlockDB> pBlockDB, const BlockHeader& header)
 {
-	Roaring leavesToAdd;
+	std::vector<uint64_t> leavesToAdd;
 	while (*m_pBlockHeader != header)
 	{
-		std::unique_ptr<Roaring> pBlockInputBitmap = pBlockDB->GetBlockInputBitmap(m_pBlockHeader->GetHash());
-		if (pBlockInputBitmap != nullptr)
+		auto pBlock = pBlockDB->GetBlock(m_pBlockHeader->GetHash());
+		if (pBlock == nullptr)
 		{
-			leavesToAdd |= *pBlockInputBitmap;
+			throw TXHASHSET_EXCEPTION(StringUtil::Format("Block not found for {}", *m_pBlockHeader));
 		}
-		else
+
+		std::unordered_map<Commitment, OutputLocation> spentOutputs = pBlockDB->GetSpentPositions(m_pBlockHeader->GetHash());
+
+		pBlockDB->RemoveOutputPositions(pBlock->GetOutputCommitments());
+
+		for (const auto& input : pBlock->GetInputs())
 		{
-			throw TXHASHSET_EXCEPTION(StringUtil::Format("Input bitmap not found for {}", *m_pBlockHeader));
+			auto iter = spentOutputs.find(input.GetCommitment());
+			if (iter == spentOutputs.end())
+			{
+				throw TXHASHSET_EXCEPTION(StringUtil::Format("Spent output not found for {}", input.GetCommitment()));
+			}
+
+			pBlockDB->AddOutputPosition(input.GetCommitment(), iter->second);
+			leavesToAdd.push_back(MMRUtil::GetLeafIndex(iter->second.GetMMRIndex()));
 		}
 
 		m_pBlockHeader = pBlockDB->GetBlockHeader(m_pBlockHeader->GetPreviousBlockHash());
@@ -306,14 +375,11 @@ void TxHashSet::Rewind(std::shared_ptr<const IBlockDB> pBlockDB, const BlockHead
 
 void TxHashSet::Commit()
 {
-	this->m_pKernelMMR->Commit();
-	this->m_pOutputPMMR->Commit();
-	this->m_pRangeProofPMMR->Commit();
-	//std::vector<std::thread> threads;
-	//threads.emplace_back(std::thread([this] { this->m_pKernelMMR->Commit(); }));
-	//threads.emplace_back(std::thread([this] { this->m_pOutputPMMR->Commit(); }));
-	//threads.emplace_back(std::thread([this] { this->m_pRangeProofPMMR->Commit(); }));
-	//ThreadUtil::JoinAll(threads);
+	std::vector<std::thread> threads;
+	threads.emplace_back(std::thread([this] { this->m_pKernelMMR->Commit(); }));
+	threads.emplace_back(std::thread([this] { this->m_pOutputPMMR->Commit(); }));
+	threads.emplace_back(std::thread([this] { this->m_pRangeProofPMMR->Commit(); }));
+	ThreadUtil::JoinAll(threads);
 
 	m_pBlockHeaderBackup = m_pBlockHeader;
 }

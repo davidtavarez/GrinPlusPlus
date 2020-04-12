@@ -3,6 +3,7 @@
 #include <Net/Servers/Server.h>
 #include <Net/Servers/RPC/RPCMethod.h>
 #include <Net/Clients/RPC/RPC.h>
+#include <Core/Exceptions/APIException.h>
 #include <unordered_map>
 #include <cassert>
 
@@ -25,6 +26,8 @@ public:
 	{
 		m_methods[method] = pMethod;
 	}
+
+	const ServerPtr& GetServer() const { return m_pServer; }
 
 private:
 	RPCServer(ServerPtr pServer) : m_pServer(pServer) { }
@@ -67,6 +70,10 @@ private:
 		catch (const RPCException& e)
 		{
 			return RPC::Response::BuildError(e.GetId().value_or(Json::nullValue), RPC::ErrorCode::INVALID_REQUEST, e.what());
+		}
+		catch (const APIException& e)
+		{
+			return RPC::Response::BuildError(id, e.GetErrorCode(), e.GetMsg());
 		}
 		catch (const std::exception& e)
 		{

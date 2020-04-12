@@ -1,12 +1,12 @@
 #pragma once
 
-#include "Chain.h"
 #include "ChainStore.h"
 #include "OrphanPool/OrphanPool.h"
 
 #include <P2P/SyncStatus.h>
 #include <Core/Models/BlockHeader.h>
 #include <BlockChain/ChainType.h>
+#include <BlockChain/Chain.h>
 #include <Core/Models/DTOs/BlockWithOutputs.h>
 #include <PMMR/HeaderMMR.h>
 #include <PMMR/TxHashSetManager.h>
@@ -28,7 +28,7 @@ public:
 		std::shared_ptr<Locked<IHeaderMMR>> pHeaderMMR,
 		std::shared_ptr<ITransactionPool> pTransactionPool,
 		std::shared_ptr<Locked<TxHashSetManager>> pTxHashSetManager,
-		BlockHeaderPtr pGenesisHeader
+		const FullBlock& genesisBlock
 	);
 
 	void UpdateSyncStatus(SyncStatus& syncStatus) const;

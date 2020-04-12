@@ -19,7 +19,7 @@ public:
 	TxHashSetManager(const Config& config);
 	~TxHashSetManager() = default;
 
-	std::shared_ptr<ITxHashSet> Open(BlockHeaderPtr pConfirmedTip);
+	std::shared_ptr<ITxHashSet> Open(BlockHeaderPtr pConfirmedTip, const FullBlock& genesisBlock);
 	void Close() { m_pTxHashSet.reset(); }
 
 	std::shared_ptr<ITxHashSet> GetTxHashSet() { return m_pTxHashSet; }
@@ -27,7 +27,7 @@ public:
 	void SetTxHashSet(ITxHashSetPtr pTxHashSet) { m_pTxHashSet = pTxHashSet; }
 
 	static ITxHashSetPtr LoadFromZip(const Config& config, const fs::path& zipFilePath, BlockHeaderPtr pHeader);
-	fs::path SaveSnapshot(std::shared_ptr<const IBlockDB> pBlockDB, BlockHeaderPtr pHeader) const;
+	fs::path SaveSnapshot(std::shared_ptr<IBlockDB> pBlockDB, BlockHeaderPtr pHeader) const;
 
 	virtual void Commit() override final
 	{
@@ -46,7 +46,7 @@ public:
 	}
 
 private:
-	const NodeConfig& m_config;
+	const Config& m_config;
 	std::shared_ptr<ITxHashSet> m_pTxHashSet;
 };
 

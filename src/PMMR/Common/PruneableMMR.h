@@ -42,7 +42,7 @@ public:
 		// Add to LeafSet
 		const uint64_t totalShift = m_pPruneList->GetTotalShift();
 		const uint64_t mmrIndex = m_pHashFile->GetSize() + totalShift;
-		m_pLeafSet->Add((uint32_t)mmrIndex);
+		m_pLeafSet->Add(MMRUtil::GetLeafIndex(mmrIndex));
 
 		// Add to data file
 		Serializer serializer;
@@ -64,25 +64,26 @@ public:
 			throw TXHASHSET_EXCEPTION(StringUtil::Format("Output is not a leaf ({})", mmrIndex));
 		}
 
-		if (!m_pLeafSet->Contains(mmrIndex))
+		const uint64_t leafIndex = MMRUtil::GetLeafIndex(mmrIndex);
+		if (!m_pLeafSet->Contains(leafIndex))
 		{
 			LOG_WARNING_F("LeafSet does not contain output ({})", mmrIndex);
 			throw TXHASHSET_EXCEPTION(StringUtil::Format("LeafSet does not contain output ({})", mmrIndex));
 		}
 
-		m_pLeafSet->Remove((uint32_t)mmrIndex);
+		m_pLeafSet->Remove(leafIndex);
 	}
 
-	void Rewind(const uint64_t size, const Roaring& leavesToAdd)
+	void Rewind(const uint64_t size, const std::vector<uint64_t>& leavesToAdd)
 	{
 		SetDirty(true);
 
 		m_pHashFile->Rewind(size - m_pPruneList->GetShift(size - 1));
 		m_pDataFile->Rewind(MMRUtil::GetNumLeaves(size - 1) - m_pPruneList->GetLeafShift(size - 1));
-		m_pLeafSet->Rewind(size, leavesToAdd);
+		m_pLeafSet->Rewind(MMRUtil::GetNumLeaves(size - 1), leavesToAdd);
 	}
 
-	virtual Hash Root(const uint64_t size) const override final
+	Hash Root(const uint64_t size) const final
 	{
 		return MMRHashUtil::Root(m_pHashFile, size, m_pPruneList);
 	}
@@ -92,14 +93,14 @@ public:
 		return m_pLeafSet->Root(size);
 	}
 
-	virtual uint64_t GetSize() const override final
+	uint64_t GetSize() const final
 	{
 		const uint64_t totalShift = m_pPruneList->GetTotalShift();
 
 		return totalShift + m_pHashFile->GetSize();
 	}
 
-	virtual std::unique_ptr<Hash> GetHashAt(const uint64_t mmrIndex) const  override final
+	std::unique_ptr<Hash> GetHashAt(const uint64_t mmrIndex) const final
 	{
 		Hash hash = MMRHashUtil::GetHashAt(m_pHashFile, mmrIndex, m_pPruneList);
 		if (hash == ZERO_HASH)
@@ -110,7 +111,7 @@ public:
 		return std::make_unique<Hash>(std::move(hash));
 	}
 
-	virtual std::vector<Hash> GetLastLeafHashes(const uint64_t numHashes) const override final
+	std::vector<Hash> GetLastLeafHashes(const uint64_t numHashes) const final
 	{
 		return MMRHashUtil::GetLastLeafHashes(m_pHashFile, m_pLeafSet, m_pPruneList, numHashes);
 	}
@@ -121,7 +122,7 @@ public:
 		{
 			if (mmrIndex < GetSize())
 			{
-				return m_pLeafSet->Contains(mmrIndex);
+				return m_pLeafSet->Contains(MMRUtil::GetLeafIndex(mmrIndex));
 			}
 		}
 
@@ -154,7 +155,7 @@ public:
 		return std::unique_ptr<DATA_TYPE>(nullptr);
 	}
 
-	virtual void Commit() override final
+	void Commit() final
 	{
 		if (IsDirty())
 		{
@@ -166,7 +167,7 @@ public:
 		}
 	}
 
-	virtual void Rollback() noexcept override final
+	void Rollback() noexcept final
 	{
 		if (IsDirty())
 		{

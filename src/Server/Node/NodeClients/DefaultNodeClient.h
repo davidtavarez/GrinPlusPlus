@@ -29,14 +29,33 @@ public:
 
 	static std::shared_ptr<DefaultNodeClient> Create(const Context::Ptr& pContext)
 	{
-		IDatabasePtr pDatabase = DatabaseAPI::OpenDatabase(pContext->GetConfig());
-		TxHashSetManagerPtr pTxHashSetManager = std::shared_ptr<TxHashSetManager>(new TxHashSetManager(pContext->GetConfig()));
-		std::shared_ptr<Locked<TxHashSetManager>> pLockedTxHashSetManager = std::make_shared<Locked<TxHashSetManager>>(pTxHashSetManager);
-		ITransactionPoolPtr pTransactionPool = TxPoolAPI::CreateTransactionPool(pContext->GetConfig());
-		IBlockChainServerPtr pBlockChainServer = BlockChainAPI::StartBlockChainServer(pContext->GetConfig(), pDatabase->GetBlockDB(), pLockedTxHashSetManager, pTransactionPool);
-		IP2PServerPtr pP2PServer = P2PAPI::StartP2PServer(pContext, pBlockChainServer, pLockedTxHashSetManager, pDatabase, pTransactionPool);
+		auto pDatabase = DatabaseAPI::OpenDatabase(pContext->GetConfig());
+		auto pTxHashSetManager = std::make_shared<TxHashSetManager>(pContext->GetConfig());
+		auto pLockedTxHashSetManager = std::make_shared<Locked<TxHashSetManager>>(pTxHashSetManager);
+		auto pTransactionPool = TxPoolAPI::CreateTransactionPool(pContext->GetConfig());
+		auto pHeaderMMR = HeaderMMRAPI::OpenHeaderMMR(pContext->GetConfig());
+		auto pBlockChainServer = BlockChainAPI::StartBlockChainServer(
+			pContext->GetConfig(),
+			pDatabase->GetBlockDB(),
+			pLockedTxHashSetManager,
+			pTransactionPool,
+			pHeaderMMR
+		);
+		auto pP2PServer = P2PAPI::StartP2PServer(
+			pContext,
+			pBlockChainServer,
+			pLockedTxHashSetManager,
+			pDatabase,
+			pTransactionPool
+		);
 
-		return std::make_shared<DefaultNodeClient>(DefaultNodeClient(pDatabase, pTxHashSetManager, pTransactionPool, pBlockChainServer, pP2PServer));
+		return std::make_shared<DefaultNodeClient>(
+			pDatabase,
+			pTxHashSetManager,
+			pTransactionPool,
+			pBlockChainServer,
+			pP2PServer
+		);
 	}
     
     virtual ~DefaultNodeClient() = default;
@@ -46,29 +65,23 @@ public:
 		return std::make_shared<NodeContext>(NodeContext(m_pDatabase, m_pBlockChainServer, m_pP2PServer, m_pTxHashSetManager, m_pTransactionPool));
 	}
 
-	virtual uint64_t GetChainHeight() const override final
+	uint64_t GetChainHeight() const final
 	{
 		return m_pBlockChainServer->GetHeight(EChainType::CONFIRMED);
 	}
 
-	virtual BlockHeaderPtr GetBlockHeader(const uint64_t height) const override final
+	BlockHeaderPtr GetBlockHeader(const uint64_t height) const final
 	{
 		return m_pBlockChainServer->GetBlockHeaderByHeight(height, EChainType::CONFIRMED);
 	}
 
-	virtual std::map<Commitment, OutputLocation> GetOutputsByCommitment(const std::vector<Commitment>& commitments) const override final
-	{ 
-		auto pTxHashSet = m_pTxHashSetManager->GetTxHashSet();
-		if (pTxHashSet == nullptr)
-		{
-			return std::map<Commitment, OutputLocation>();
-		}
-
+	std::map<Commitment, OutputLocation> GetOutputsByCommitment(const std::vector<Commitment>& commitments) const final
+	{
 		std::map<Commitment, OutputLocation> outputs;
 		for (const Commitment& commitment : commitments)
 		{
 			std::unique_ptr<OutputLocation> pOutputPosition = m_pDatabase->GetBlockDB()->Read()->GetOutputPosition(commitment);
-			if (pOutputPosition != nullptr && pTxHashSet->IsUnspent(*pOutputPosition))
+			if (pOutputPosition != nullptr)
 			{
 				outputs.insert(std::make_pair(commitment, *pOutputPosition));
 			}
@@ -77,12 +90,12 @@ public:
 		return outputs;
 	}
 
-	virtual std::vector<BlockWithOutputs> GetBlockOutputs(const uint64_t startHeight, const uint64_t maxHeight) const override final
+	std::vector<BlockWithOutputs> GetBlockOutputs(const uint64_t startHeight, const uint64_t maxHeight) const final
 	{
 		return m_pBlockChainServer->GetOutputsByHeight(startHeight, maxHeight);
 	}
 
-	virtual std::unique_ptr<OutputRange> GetOutputsByLeafIndex(const uint64_t startIndex, const uint64_t maxNumOutputs) const override final
+	std::unique_ptr<OutputRange> GetOutputsByLeafIndex(const uint64_t startIndex, const uint64_t maxNumOutputs) const final
 	{
 		auto pTxHashSet = m_pTxHashSetManager->GetTxHashSet();
 		if (pTxHashSet == nullptr)
@@ -94,7 +107,7 @@ public:
 		return std::make_unique<OutputRange>(pTxHashSet->GetOutputsByLeafIndex(pBlockDB.GetShared(), startIndex, maxNumOutputs));
 	}
 
-	virtual bool PostTransaction(TransactionPtr pTransaction, const EPoolType poolType) override final
+	bool PostTransaction(TransactionPtr pTransaction, const EPoolType poolType) final
 	{
 		auto pTipHeader = m_pBlockChainServer->GetTipBlockHeader(EChainType::CONFIRMED);
 		if (pTipHeader != nullptr)

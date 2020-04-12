@@ -5,7 +5,9 @@
 #include <Core/Models/BlockHeader.h>
 #include <Core/Models/OutputLocation.h>
 #include <Core/Models/DTOs/OutputRange.h>
+#include <Core/Models/TxHashSetRoots.h>
 #include <Core/Traits/Batchable.h>
+#include <BlockChain/Chain.h>
 #include <Crypto/Hash.h>
 
 // Forward Declarations
@@ -16,6 +18,7 @@ class OutputIdentifier;
 class IBlockChainServer;
 class IBlockDB;
 class Transaction;
+class TransactionBody;
 class SyncStatus;
 
 class ITxHashSet : public Traits::IBatchable
@@ -38,18 +41,8 @@ public:
 	// This is typically only used during initial sync.
 	//
 	virtual void SaveOutputPositions(
-		std::shared_ptr<IBlockDB> pBlockDB,
-		const BlockHeader& blockHeader,
-		const uint64_t firstOutputIndex
-	) = 0;
-
-
-
-	//
-	// Returns true if the output at the given location has not been spent.
-	//
-	virtual bool IsUnspent(
-		const OutputLocation& location
+		const Chain::CPtr& pChain,
+		std::shared_ptr<IBlockDB> pBlockDB
 	) const = 0;
 
 	//
@@ -74,6 +67,14 @@ public:
 	virtual bool ValidateRoots(
 		const BlockHeader& blockHeader
 	) const = 0;
+
+	//
+	// Returns the roots and sizes of each of the MMRs.
+	//
+	virtual TxHashSetRoots GetRoots(
+		const std::shared_ptr<const IBlockDB>& pBlockDB,
+		const TransactionBody& body
+	) = 0;
 
 
 
@@ -124,7 +125,7 @@ public:
 	// Rewinds the kernel, output, and rangeproof MMRs to the given block.
 	//
 	virtual void Rewind(
-		std::shared_ptr<const IBlockDB> pBlockDB,
+		std::shared_ptr<IBlockDB> pBlockDB,
 		const BlockHeader& header
 	) = 0;
 

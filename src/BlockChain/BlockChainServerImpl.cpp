@@ -8,6 +8,7 @@
 #include "Processors/BlockProcessor.h"
 #include "ChainResyncer.h"
 
+#include <GrinVersion.h>
 #include <Infrastructure/Logger.h>
 #include <Core/Exceptions/BadDataException.h>
 #include <Config/Config.h>
@@ -38,40 +39,66 @@ std::shared_ptr<BlockChainServer> BlockChainServer::Create(
 	const Config& config,
 	std::shared_ptr<Locked<IBlockDB>> pDatabase,
 	std::shared_ptr<Locked<TxHashSetManager>> pTxHashSetManager,
-	std::shared_ptr<ITransactionPool> pTransactionPool)
+	std::shared_ptr<ITransactionPool> pTransactionPool,
+	std::shared_ptr<Locked<IHeaderMMR>> pHeaderMMR)
 {
 	const FullBlock& genesisBlock = config.GetEnvironment().GetGenesisBlock();
-	std::shared_ptr<BlockIndex> pGenesisIndex = std::make_shared<BlockIndex>(genesisBlock.GetHash(), 0);
+	auto pGenesisIndex = std::make_shared<BlockIndex>(genesisBlock.GetHash(), 0);
 
-	std::shared_ptr<Locked<ChainStore>> pChainStore = ChainStore::Load(config, pGenesisIndex);
-	std::shared_ptr<Locked<IHeaderMMR>> pHeaderMMR = HeaderMMRAPI::OpenHeaderMMR(config);
-
-	std::shared_ptr<Locked<ChainState>> pChainState = ChainState::Create(
+	auto pChainStore = ChainStore::Load(config, pGenesisIndex);
+	auto pChainState = ChainState::Create(
 		config,
 		pChainStore,
 		pDatabase,
 		pHeaderMMR,
 		pTransactionPool,
 		pTxHashSetManager,
-		genesisBlock.GetBlockHeader()
+		genesisBlock
 	);
 
 	// Trigger Compaction
-	auto pTxHashSet = pTxHashSetManager->Write()->GetTxHashSet();
-	if (pTxHashSet != nullptr)
 	{
-		const uint64_t horizon = Consensus::GetHorizonHeight(pChainState->Read()->GetHeight(EChainType::CONFIRMED));
-		if (pTxHashSet->GetFlushedBlockHeader()->GetHeight() < horizon)
+		auto pBatch = pTxHashSetManager->BatchWrite();
+		auto pTxHashSet = pBatch->GetTxHashSet();
+		if (pTxHashSet != nullptr)
 		{
-			pTxHashSetManager->Write()->Close();
-		}
-		else
-		{
-			pTxHashSet->Compact();
+			const uint64_t horizon = Consensus::GetHorizonHeight(pChainState->Read()->GetHeight(EChainType::CONFIRMED));
+			if (pTxHashSet->GetFlushedBlockHeader()->GetHeight() < horizon)
+			{
+				pTxHashSetManager->Write()->Close();
+			}
+			else
+			{
+				pTxHashSet->Compact();
+			}
+
+			pBatch->Commit();
 		}
 	}
 
-	return std::make_shared<BlockChainServer>(BlockChainServer(
+	const auto versionPath = config.GetDataDirectory() / "NODE" / "version.txt";
+	std::vector<uint8_t> versionData;
+	if (!FileUtil::ReadFile(versionPath, versionData))
+	{
+		LOG_WARNING_F("Updating chain for version {}", GRINPP_VERSION);
+		auto pBlockDB = pDatabase->Write();
+		pBlockDB->ClearOutputPositions();
+
+		auto pTxHashSetReader = pTxHashSetManager->Read();
+		if (pTxHashSetReader->GetTxHashSet() != nullptr)
+		{
+			pTxHashSetReader->GetTxHashSet()->SaveOutputPositions(
+				pChainStore->Read()->GetCandidateChain(),
+				pBlockDB.GetShared()
+			);
+		}
+
+		pBlockDB->Commit();
+
+		FileUtil::WriteTextToFile(versionPath, GRINPP_VERSION);
+	}
+
+	return std::shared_ptr<BlockChainServer>(new BlockChainServer(
 		config,
 		pDatabase,
 		pTxHashSetManager,
@@ -81,9 +108,9 @@ std::shared_ptr<BlockChainServer> BlockChainServer::Create(
 	));
 }
 
-bool BlockChainServer::ResyncChain()
+void BlockChainServer::ResyncChain()
 {
-	return ChainResyncer(m_pChainState).ResyncChain();
+	ChainResyncer(m_pChainState).ResyncChain();
 }
 
 void BlockChainServer::UpdateSyncStatus(SyncStatus& syncStatus) const
@@ -107,8 +134,9 @@ EBlockChainStatus BlockChainServer::AddBlock(const FullBlock& block)
 	{
 		return BlockProcessor(m_config, m_pChainState).ProcessBlock(block);
 	}
-	catch (std::exception&)
+	catch (std::exception& e)
 	{
+		LOG_ERROR_F("Invalid block: {}", e.what());
 		return EBlockChainStatus::INVALID;
 	}
 }
@@ -151,14 +179,15 @@ EBlockChainStatus BlockChainServer::AddCompactBlock(const CompactBlock& compactB
 
 fs::path BlockChainServer::SnapshotTxHashSet(BlockHeaderPtr pBlockHeader)
 {
-	auto pReader = m_pChainState->Read();
-	const uint64_t horizon = Consensus::GetHorizonHeight(pReader->GetHeight(EChainType::CONFIRMED));
+	// TODO: Use reader if possible
+	auto pBatch = m_pChainState->BatchWrite(); // DO NOT COMMIT THIS BATCH
+	const uint64_t horizon = Consensus::GetHorizonHeight(pBatch->GetHeight(EChainType::CONFIRMED));
 	if (pBlockHeader->GetHeight() < horizon)
 	{
 		throw BAD_DATA_EXCEPTION("TxHashSet snapshot requested beyond horizon.");
 	}
 
-	return pReader->GetTxHashSetManager()->SaveSnapshot(pReader->GetBlockDB().GetShared(), pBlockHeader);
+	return pBatch->GetTxHashSetManager()->SaveSnapshot(pBatch->GetBlockDB(), pBlockHeader);
 }
 
 EBlockChainStatus BlockChainServer::ProcessTransactionHashSet(const Hash& blockHash, const fs::path& path, SyncStatus& syncStatus)
@@ -393,8 +422,9 @@ namespace BlockChainAPI
 		const Config& config,
 		std::shared_ptr<Locked<IBlockDB>> pDatabase,
 		std::shared_ptr<Locked<TxHashSetManager>> pTxHashSetManager,
-		std::shared_ptr<ITransactionPool> pTransactionPool)
+		std::shared_ptr<ITransactionPool> pTransactionPool,
+		std::shared_ptr<Locked<IHeaderMMR>> pHeaderMMR)
 	{
-		return BlockChainServer::Create(config, pDatabase, pTxHashSetManager, pTransactionPool);
+		return BlockChainServer::Create(config, pDatabase, pTxHashSetManager, pTransactionPool, pHeaderMMR);
 	}
 }

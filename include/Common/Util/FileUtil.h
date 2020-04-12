@@ -67,12 +67,12 @@ public:
 
 	static void SafeWriteToFile(const fs::path& filePath, const std::vector<unsigned char>& data)
 	{
-		const std::string tmpFilePath = filePath.u8string() + ".tmp";
-		std::ofstream file(StringUtil::ToWide(tmpFilePath).c_str(), std::ios::out | std::ios::binary | std::ios::ate);
+		const fs::path tmpFilePath = ToPath(filePath.u8string() + ".tmp");
+		std::ofstream file(tmpFilePath, std::ios::out | std::ios::binary | std::ios::ate);
 		if (!file.is_open())
 		{
-			LOG_ERROR_F("Failed to open {}", ToPath(tmpFilePath));
-			throw FILE_EXCEPTION_F("Failed to open {}", ToPath(tmpFilePath));
+			LOG_ERROR_F("Failed to open {}", tmpFilePath);
+			throw FILE_EXCEPTION_F("Failed to open {}", tmpFilePath);
 		}
 
 		file.write((const char*)&data[0], data.size());
@@ -81,13 +81,13 @@ public:
 		RenameFile(tmpFilePath, filePath);
 	}
 
-	static void WriteTextToFile(const std::string& filePath, const std::string& text)
+	static void WriteTextToFile(const fs::path& filePath, const std::string& text)
 	{
-		std::ofstream file(StringUtil::ToWide(filePath).c_str(), std::ios::out | std::ios::trunc);
+		std::ofstream file(filePath, std::ios::out | std::ios::trunc);
 		if (!file.is_open())
 		{
-			LOG_ERROR_F("Failed to open {}", ToPath(filePath));
-			throw FILE_EXCEPTION_F("Failed to open {}", ToPath(filePath));
+			LOG_ERROR_F("Failed to open {}", filePath);
+			throw FILE_EXCEPTION_F("Failed to open {}", filePath);
 		}
 
 		file.write(text.c_str(), text.size());
@@ -152,17 +152,17 @@ public:
 	static fs::path GetHomeDirectory()
 	{
 		#ifdef _WIN32
-		char homeDriveBuf[MAX_PATH_LEN];
+		wchar_t homeDriveBuf[MAX_PATH_LEN];
 		size_t homeDriveLen = MAX_PATH_LEN;
-		getenv_s(&homeDriveLen, homeDriveBuf, sizeof(homeDriveBuf) - 1, "HOMEDRIVE");
-		std::string homeDrive(homeDriveBuf, (std::max)(1ULL, homeDriveLen) - 1);
+		_wgetenv_s(&homeDriveLen, homeDriveBuf, sizeof(homeDriveBuf) - 1, L"HOMEDRIVE");
+		std::wstring homeDrive(homeDriveBuf, (std::max)(1ULL, homeDriveLen) - 1);
 
-		char homePathBuf[MAX_PATH_LEN];
+		wchar_t homePathBuf[MAX_PATH_LEN];
 		size_t homePathLen = MAX_PATH_LEN;
-		getenv_s(&homePathLen, homePathBuf, sizeof(homePathBuf) - 1, "HOMEPATH");
-		std::string homePath(homePathBuf, (std::max)(1ULL, homePathLen) - 1);
+		_wgetenv_s(&homePathLen, homePathBuf, sizeof(homePathBuf) - 1, L"HOMEPATH");
+		std::wstring homePath(homePathBuf, (std::max)(1ULL, homePathLen) - 1);
 
-		return fs::path(homeDrive + homePath);
+		return fs::path(homeDrive) / homePath;
 		#else
 		char* pHomePath = getenv("HOME");
 		if (pHomePath != nullptr)
